@@ -10,6 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+)
+
+const (
+	keycloakTimeout = 10 * time.Second
+	maxBodyBytes    = 1 << 20 // 1 MB
 )
 
 // Config the plugin configuration.
@@ -28,6 +34,7 @@ type RptHandler struct {
 	keycloak string
 	audience string
 	name     string
+	client   *http.Client
 }
 
 type RptTokenBody struct {
@@ -51,15 +58,33 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		audience: config.Audience,
 		next:     next,
 		name:     name,
+		client:   &http.Client{Timeout: keycloakTimeout},
 	}, nil
 }
 
 func (a *RptHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	var currentAuthHeader = req.Header.Get("Authorization")
-	var currentOrigin = req.Header.Get("Origin")
+	currentAuthHeader := req.Header.Get("Authorization")
+	currentOrigin := req.Header.Get("Origin")
 
 	if currentAuthHeader == "" || req.Method == "OPTIONS" {
 		a.next.ServeHTTP(rw, req)
+		return
+	}
+
+	if !strings.HasPrefix(currentAuthHeader, "Bearer ") {
+		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if len(currentAuthHeader) > 8192 {
+		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	token := currentAuthHeader[len("Bearer "):]
+	if strings.Count(token, ".") != 2 {
+		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
+		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
@@ -67,9 +92,8 @@ func (a *RptHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:uma-ticket")
 	data.Set("audience", a.audience)
 
-	newRequest, err := http.NewRequest(http.MethodPost, a.keycloak, strings.NewReader(data.Encode()))
+	newRequest, err := http.NewRequestWithContext(req.Context(), http.MethodPost, a.keycloak, strings.NewReader(data.Encode()))
 	if err != nil {
-		// handle error
 		log.Println("Could not create new request", err.Error())
 		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -78,17 +102,16 @@ func (a *RptHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	newRequest.Header.Add("Authorization", currentAuthHeader)
 	newRequest.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{}
-	resp, err := client.Do(newRequest)
+	resp, err := a.client.Do(newRequest)
 	if err != nil {
 		log.Println("Could not execute request", err.Error())
 		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		log.Println("Could not read body from response", err.Error())
 		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
@@ -96,18 +119,16 @@ func (a *RptHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// json parse
 	var rptTokenBody RptTokenBody
-	err = json.Unmarshal(body, &rptTokenBody)
-	newAuthorizationHeader := "Bearer " + rptTokenBody.Access_token
-	if err != nil {
+	if err = json.Unmarshal(body, &rptTokenBody); err != nil {
 		log.Println("Unmarshalling failed :", err.Error())
 		rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
 		rw.WriteHeader(http.StatusForbidden)
 		return
 	}
+
 	if len(rptTokenBody.Error) > 0 {
-		if strings.Trim(rptTokenBody.Error, " ") == "invalid_grant" {
+		if strings.TrimSpace(rptTokenBody.Error) == "invalid_grant" {
 			// In case the access token has expired, sent a 401 instead of a 403
 			log.Println("Invalid grant :", rptTokenBody.Error)
 			rw.Header().Set("Access-Control-Allow-Origin", currentOrigin)
@@ -121,6 +142,6 @@ func (a *RptHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	req.Header.Set("Authorization", newAuthorizationHeader)
+	req.Header.Set("Authorization", "Bearer "+rptTokenBody.Access_token)
 	a.next.ServeHTTP(rw, req)
 }
