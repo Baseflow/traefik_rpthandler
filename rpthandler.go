@@ -67,9 +67,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if len(config.Keycloak) == 0 {
 		return nil, fmt.Errorf("keycloak cannot be empty")
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// The default of 2 idle connections per host makes every burst open fresh TCP connections to Keycloak.
-	transport.MaxIdleConnsPerHost = 100
+transport := http.DefaultTransport
+	if base, ok := transport.(*http.Transport); ok {
+		cloned := base.Clone()
+		// The default of 2 idle connections per host makes every burst open fresh TCP connections to Keycloak.
+		cloned.MaxIdleConnsPerHost = 100
+		transport = cloned
+	}
 	return &RptHandler{
 		keycloak: config.Keycloak,
 		audience: config.Audience,
