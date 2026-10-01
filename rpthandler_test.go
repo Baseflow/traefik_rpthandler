@@ -115,3 +115,9 @@ func TestPreflightAndExpiredGrantKeepTheirBehaviour(t *testing.T) {
 		t.Fatalf("invalid_grant: want 401 with the CORS origin, got %d %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
+
+func TestCacheIsOptIn(t *testing.T) {
+	if CreateConfig().CacheSeconds != 0 {
+		t.Fatal("the cache must be off unless a middleware sets cacheSeconds")
+	}
+}

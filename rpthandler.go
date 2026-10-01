@@ -21,13 +21,14 @@ type Config struct {
 	Keycloak string
 	Audience string
 	// CacheSeconds caps how long an RPT is reused, and so how long a permission change, logout or
-	// revoked session in Keycloak can go unnoticed. 0 disables the cache.
+	// revoked session in Keycloak can go unnoticed. 0, the default, disables the cache, so a
+	// middleware only caches when it opts in.
 	CacheSeconds int
 }
 
 // CreateConfig creates the default plugin configuration.
 func CreateConfig() *Config {
-	return &Config{CacheSeconds: 60}
+	return &Config{}
 }
 
 // When full, the cache sweeps expired entries and then clears outright; concurrent misses for one
@@ -67,7 +68,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if len(config.Keycloak) == 0 {
 		return nil, fmt.Errorf("keycloak cannot be empty")
 	}
-transport := http.DefaultTransport
+	transport := http.DefaultTransport
 	if base, ok := transport.(*http.Transport); ok {
 		cloned := base.Clone()
 		// The default of 2 idle connections per host makes every burst open fresh TCP connections to Keycloak.
